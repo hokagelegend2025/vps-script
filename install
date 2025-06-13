@@ -52,7 +52,7 @@ log_message "Menginstal Certbot (menggunakan snap)..."
 sudo snap install core || { log_message "ERROR: Gagal menginstal snap core."; exit 1; }
 sudo snap refresh core || { log_message "ERROR: Gagal me-refresh snap core."; exit 1; }
 sudo snap install --classic certbot || { log_message "ERROR: Gagal menginstal Certbot."; exit 1; }
-sudo ln -s /snap/bin/certbot /usr/bin/certbot || { log_message "ERROR: Gagal membuat symlink Certbot."; exit 1; }
+sudo ln -sf /snap/bin/certbot /usr/bin/certbot 2>/dev/null || { log_message "ERROR: Gagal membuat symlink Certbot."; exit 1; }
 
 # Hentikan Nginx sementara agar Certbot bisa mengambil sertifikat
 log_message "Menghentikan Nginx untuk proses Certbot..."

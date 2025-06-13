@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # --- VARIBEL YANG PERLU DIKONFIGURASI ---
-YOUR_DOMAIN="13.hokageyoutube.my.id"  # Ganti dengan domain Anda
+YOUR_DOMAIN="14.hokageyoutube.my.id"  # Ganti dengan domain Anda
 SSH_USERNAME="hokage"                 # Ganti dengan username SSH yang Anda inginkan
 SSH_PASSWORD="legend"                 # Ganti dengan password SSH (DIREKOMENDASIKAN MENGGUNAKAN SSH KEY!)
                                      # Jika Anda tidak ingin password di sini, hapus baris ini dan

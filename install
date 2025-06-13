@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # --- VARIBEL YANG PERLU DIKONFIGURASI ---
-YOUR_DOMAIN="12.hokageyoutube.my.id"  # Ganti dengan domain Anda
+YOUR_DOMAIN="13.hokageyoutube.my.id"  # Ganti dengan domain Anda
 SSH_USERNAME="hokage"                 # Ganti dengan username SSH yang Anda inginkan
 SSH_PASSWORD="legend"                 # Ganti dengan password SSH (DIREKOMENDASIKAN MENGGUNAKAN SSH KEY!)
                                      # Jika Anda tidak ingin password di sini, hapus baris ini dan
@@ -10,7 +10,7 @@ SSH_PASSWORD="legend"                 # Ganti dengan password SSH (DIREKOMENDASI
 
 SSH_TUNNEL_PORT=443                  # Port Nginx untuk tunneling SSH (umumnya 443 dengan SSL)
 SSH_INTERNAL_PORT=22                 # Port SSH server (default 22)
-CERTBOT_EMAIL="your_email@example.com" # Ganti dengan alamat email Anda untuk notifikasi Certbot
+CERTBOT_EMAIL="faridaumiabi@gmail.com" # Ganti dengan alamat email Anda untuk notifikasi Certbot
 
 # --- FUNGSI LOGGING ---
 log_info() {
@@ -78,7 +78,7 @@ log_info "Menunggu 5 detik untuk memastikan port dilepaskan..."
 sleep 5
 log_info "Memverifikasi port $SSH_TUNNEL_PORT bebas setelah pembersihan..."
 if sudo netstat -tulnp | grep ":$SSH_TUNNEL_PORT" &>/dev/null; then
-    log_error "Port $SSH_TUNNEL_PORT masih digunakan setelah pembersihan. Ada proses lain yang menggunakannya. Harap reboot VPS secara manual dan coba lagi."
+    log_error "Port $SSH_TUNNEL_PORT masih digunakan setelah pembersihan. Mungkin ada proses lain yang menggunakannya. Harap reboot VPS secara manual dan coba lagi."
 else
     log_info "Port $SSH_TUNNEL_PORT bersih dan siap untuk instalasi baru."
 fi
@@ -101,11 +101,30 @@ sudo apt install openssh-server -y || log_error "Gagal menginstal OpenSSH Server
 sudo systemctl enable ssh || log_error "Gagal mengaktifkan SSH di startup."
 sudo systemctl start ssh || log_error "Gagal memulai SSH."
 
-# 3. INSTALASI NGINX
-log_info "Memeriksa dan menginstal Nginx..."
-sudo apt install nginx -y || log_error "Gagal menginstal Nginx."
+# 3. INSTALASI NGINX (Penting: Gunakan nginx-full atau nginx-extras untuk modul stream)
+log_info "Memeriksa dan menginstal Nginx (paket full/extras untuk modul stream)..."
+if sudo apt install nginx-full -y; then
+    log_info "Nginx-full berhasil diinstal."
+elif sudo apt install nginx-extras -y; then
+    log_info "Nginx-extras berhasil diinstal."
+else
+    log_error "Gagal menginstal Nginx (nginx-full atau nginx-extras). Modul stream mungkin tidak tersedia."
+fi
+
 sudo systemctl enable nginx || log_error "Gagal mengaktifkan Nginx di startup."
 # Nginx akan dimulai setelah konfigurasi lengkap
+
+# Verifikasi direktori modul Nginx dan keberadaan file .so
+log_info "Memverifikasi direktori modul Nginx..."
+NGINX_MODULES_PATH="/usr/lib/nginx/modules"
+if [ ! -d "$NGINX_MODULES_PATH" ]; then
+    log_error "Direktori modul Nginx ($NGINX_MODULES_PATH) tidak ditemukan setelah instalasi Nginx. Instalasi Nginx mungkin rusak."
+fi
+if [ ! -f "$NGINX_MODULES_PATH/ngx_stream_module.so" ]; then
+    log_error "File modul stream (ngx_stream_module.so) tidak ditemukan di $NGINX_MODULES_PATH. Modul stream tidak terinstal dengan benar."
+fi
+log_info "Direktori modul Nginx dan file modul stream telah diverifikasi."
+
 
 # 4. INSTALASI CERTBOT (untuk SSL/TLS)
 log_info "Memeriksa dan menginstal Certbot untuk SSL/TLS..."
@@ -237,21 +256,21 @@ sudo ln -sf "$DEFAULT_HTTP_CONF" /etc/nginx/sites-enabled/default
 
 # --- 6. DAPATKAN SERTIFIKAT SSL DENGAN CERTBOT ---
 log_info "Mendapatkan sertifikat SSL untuk $YOUR_DOMAIN..."
-# Hapus direktori live dan archive yang mungkin tersisa dari Certbot sebelumnya
+# Hapus direktori live dan archive yang mungkin tersisa dari Certbot sebelumnya (jika tidak terhapus sempurna oleh uninstall)
 sudo rm -rf /etc/letsencrypt/live/$YOUR_DOMAIN || true
 sudo rm -rf /etc/letsencrypt/archive/$YOUR_DOMAIN || true
 
 # Perbarui izin direktori Let's Encrypt (penting!)
 # Ini harus 755 agar www-data bisa mengaksesnya
-sudo chmod 755 /etc/letsencrypt/live || true
-sudo chmod 755 /etc/letsencrypt/archive || true
+sudo chmod 755 /etc/letsencrypt/live || log_warn "Gagal mengatur izin untuk /etc/letsencrypt/live. Mungkin direktori tidak ada."
+sudo chmod 755 /etc/letsencrypt/archive || log_warn "Gagal mengatur izin untuk /etc/letsencrypt/archive. Mungkin direktori tidak ada."
 
 
-sudo certbot --nginx -d "$YOUR_DOMAIN" --non-interactive --agree-tos --email "$CERTBOT_EMAIL" || log_error "Gagal mendapatkan sertifikat SSL dari Certbot."
+sudo certbot --nginx -d "$YOUR_DOMAIN" --non-interactive --agree-tos --email "$CERTBOT_EMAIL" || log_error "Gagal mendapatkan sertifikat SSL dari Certbot. Periksa log Certbot: /var/log/letsencrypt/letsencrypt.log"
 
 # Perbaiki izin direktori Let's Encrypt setelah Certbot (ini harus tetap 755)
-sudo chmod 755 /etc/letsencrypt/live || log_warn "Gagal mengatur izin untuk /etc/letsencrypt/live."
-sudo chmod 755 /etc/letsencrypt/archive || log_warn "Gagal mengatur izin untuk /etc/letsencrypt/archive."
+sudo chmod 755 /etc/letsencrypt/live || log_warn "Gagal mengatur izin ulang untuk /etc/letsencrypt/live."
+sudo chmod 755 /etc/letsencrypt/archive || log_warn "Gagal mengatur izin ulang untuk /etc/letsencrypt/archive."
 
 # Verifikasi Nginx Config setelah Certbot
 sudo nginx -t || log_error "Nginx konfigurasi error setelah Certbot. Periksa log!"

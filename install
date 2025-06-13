@@ -31,78 +31,96 @@ if [[ $EUID -ne 0 ]]; then
    log_error "Skrip ini harus dijalankan sebagai root atau dengan sudo."
 fi
 
-log_info "Memulai proses penghapusan dan instalasi ulang SSH Tunneling (tanpa UFW)..."
+log_info "Memulai proses setup SSH Tunneling (Uninstall lama, Install baru)..."
 
-# --- 0. HENTIKAN DAN HAPUS LAYANAN YANG ADA ---
-log_info "Menghentikan dan menghapus semua proses Nginx dan Certbot yang mungkin ada..."
+# --- BAGIAN 1: UNINSTALL DAN CLEANUP LAMA ---
+log_info "--------------------------------------------------------"
+log_info "MEMULAI FASE UNINSTALL: Menghapus Nginx dan Certbot lama..."
+log_info "--------------------------------------------------------"
 
-# Bunuh semua proses Nginx yang mungkin "nyangkut"
+# 1. HENTIKAN DAN BUNUH SEMUA PROSES NGINX
+log_info "Menghentikan layanan Nginx..."
+sudo systemctl stop nginx || true
+log_info "Mencari dan membunuh semua proses Nginx yang mungkin 'nyangkut'..."
 sudo killall -9 nginx || true
-sudo rm -f /run/nginx.pid || true
+sudo rm -f /run/nginx.pid || true # Hapus file PID yang mungkin tersisa
 
-# Hapus Nginx sepenuhnya
-log_info "Menghapus Nginx sepenuhnya..."
-sudo apt purge nginx nginx-common -y || log_warn "Gagal menghapus Nginx, mungkin tidak terinstal."
+# 2. HAPUS NGINX SEPENUHNYA
+log_info "Menghapus paket Nginx sepenuhnya..."
+sudo apt purge nginx nginx-common nginx-core -y || log_warn "Gagal menghapus paket Nginx, mungkin tidak terinstal."
 sudo apt autoremove -y || log_warn "Gagal autoremove paket."
 sudo apt clean || log_warn "Gagal membersihkan cache apt."
 
-# Hapus sisa-sisa konfigurasi Nginx
-log_info "Menghapus sisa-sisa konfigurasi Nginx..."
+# Hapus sisa-sisa konfigurasi Nginx dan log
+log_info "Menghapus sisa-sisa konfigurasi Nginx dan direktori terkait..."
 sudo rm -rf /etc/nginx/ || log_warn "Direktori /etc/nginx tidak ditemukan."
 sudo rm -rf /var/lib/nginx/ || log_warn "Direktori /var/lib/nginx tidak ditemukan."
-sudo rm -f /var/log/nginx/* || log_warn "Log Nginx tidak ditemukan."
+sudo rm -rf /var/log/nginx/ || log_warn "Direktori /var/log/nginx tidak ditemukan."
 
-# Hapus Certbot snap dan sisa-sisa Let's Encrypt
-log_info "Menghapus Certbot dan sisa-sisa Let's Encrypt..."
+# 3. HENTIKAN DAN HAPUS CERTBOT
+log_info "Menghentikan layanan Certbot..."
+sudo systemctl stop certbot.timer || true
+sudo systemctl stop snap.certbot.renew.timer || true
+sudo systemctl stop certbot || true
+sudo systemctl stop snap.certbot.certbot.service || true
+
+log_info "Menghapus instalasi Certbot (via snap dan apt)..."
 sudo snap remove certbot || true # Hapus jika terinstal via snap
 sudo apt purge certbot -y || true # Hapus jika terinstal via apt
+
+# Hapus sisa-sisa Let's Encrypt
+log_info "Menghapus sisa-sisa konfigurasi Let's Encrypt..."
 sudo rm -rf /etc/letsencrypt/ || log_warn "Direktori /etc/letsencrypt tidak ditemukan."
 sudo rm -rf /var/lib/letsencrypt/ || log_warn "Direktori /var/lib/letsencrypt tidak ditemukan."
 
-# Pastikan port 443 bebas
-log_info "Memverifikasi port 443 bebas..."
+# 4. VERIFIKASI PORT 443 BEBAS SETELAH PEMBERSIHAN
+log_info "Menunggu 5 detik untuk memastikan port dilepaskan..."
+sleep 5
+log_info "Memverifikasi port $SSH_TUNNEL_PORT bebas setelah pembersihan..."
 if sudo netstat -tulnp | grep ":$SSH_TUNNEL_PORT" &>/dev/null; then
-    log_error "Port $SSH_TUNNEL_PORT masih digunakan setelah pembersihan. Ada proses lain yang menggunakannya."
+    log_error "Port $SSH_TUNNEL_PORT masih digunakan setelah pembersihan. Ada proses lain yang menggunakannya. Harap reboot VPS secara manual dan coba lagi."
+else
+    log_info "Port $SSH_TUNNEL_PORT bersih dan siap untuk instalasi baru."
 fi
-log_info "Port $SSH_TUNNEL_PORT bersih."
 
-# --- 1. UPDATE SISTEM ---
-log_info "Memperbarui sistem..."
+log_info "--------------------------------------------------------"
+log_info "FASE UNINSTALL SELESAI. MEMULAI FASE INSTALL..."
+log_info "--------------------------------------------------------"
+
+# --- BAGIAN 2: INSTALASI DAN KONFIGURASI BARU ---
+
+# 1. UPDATE SISTEM
+log_info "Memperbarui daftar paket sistem..."
 sudo apt update || log_error "Gagal memperbarui daftar paket."
+log_info "Mengupgrade paket sistem..."
 sudo apt upgrade -y || log_error "Gagal mengupgrade paket."
 
-# --- 2. INSTALASI OPENSSH SERVER ---
+# 2. INSTALASI OPENSSH SERVER
 log_info "Memeriksa dan menginstal OpenSSH Server..."
 sudo apt install openssh-server -y || log_error "Gagal menginstal OpenSSH Server."
 sudo systemctl enable ssh || log_error "Gagal mengaktifkan SSH di startup."
 sudo systemctl start ssh || log_error "Gagal memulai SSH."
 
-# --- 3. INSTALASI NGINX ---
+# 3. INSTALASI NGINX
 log_info "Memeriksa dan menginstal Nginx..."
 sudo apt install nginx -y || log_error "Gagal menginstal Nginx."
 sudo systemctl enable nginx || log_error "Gagal mengaktifkan Nginx di startup."
-sudo systemctl start nginx || log_error "Gagal memulai Nginx."
+# Nginx akan dimulai setelah konfigurasi lengkap
 
-# --- 4. INSTALASI CERTBOT (untuk SSL/TLS) ---
+# 4. INSTALASI CERTBOT (untuk SSL/TLS)
 log_info "Memeriksa dan menginstal Certbot untuk SSL/TLS..."
 sudo snap install core --classic || log_error "Gagal menginstal snap core."
 sudo snap refresh core || log_error "Gagal refresh snap core."
 sudo snap install --classic certbot || log_error "Gagal menginstal Certbot snap."
 sudo ln -sf /snap/bin/certbot /usr/bin/certbot || log_warn "Gagal membuat symlink Certbot, mungkin sudah ada."
 
-# --- 5. KONFIGURASI NGINX (Stream dan HTTP) ---
+# 5. KONFIGURASI NGINX (Stream dan HTTP)
 log_info "Mengkonfigurasi Nginx untuk SSH Tunneling dan HTTP..."
 
 # Buat file konfigurasi Nginx utama
 NGINX_CONF_PATH="/etc/nginx/nginx.conf"
 
-# Backup konfigurasi Nginx yang ada (jika ada yang baru diinstal)
-if [ -f "$NGINX_CONF_PATH" ]; then
-    sudo cp "$NGINX_CONF_PATH" "${NGINX_CONF_PATH}.bak.$(date +%Y%m%d%H%M%S)"
-    log_info "Backup $NGINX_CONF_PATH berhasil."
-fi
-
-# Buat ulang nginx.conf dari template bersih
+# Buat ulang nginx.conf dari template bersih dengan load_module path absolut
 sudo cat <<EOF > "$NGINX_CONF_PATH"
 user www-data;
 worker_processes auto;
@@ -110,11 +128,11 @@ pid /run/nginx.pid;
 error_log /var/log/nginx/error.log;
 include /etc/nginx/modules-enabled/*.conf;
 
-
 # Muat modul stream secara eksplisit dengan path absolut yang benar
 load_module /usr/lib/nginx/modules/ngx_stream_module.so;
 load_module /usr/lib/nginx/modules/ngx_stream_ssl_module.so;
 load_module /usr/lib/nginx/modules/ngx_stream_ssl_preread_module.so;
+
 events {
     worker_connections 768;
     # multi_accept on;
@@ -232,8 +250,8 @@ sudo chmod 755 /etc/letsencrypt/archive || true
 sudo certbot --nginx -d "$YOUR_DOMAIN" --non-interactive --agree-tos --email "$CERTBOT_EMAIL" || log_error "Gagal mendapatkan sertifikat SSL dari Certbot."
 
 # Perbaiki izin direktori Let's Encrypt setelah Certbot (ini harus tetap 755)
-sudo chmod 755 /etc/letsencrypt/live
-sudo chmod 755 /etc/letsencrypt/archive
+sudo chmod 755 /etc/letsencrypt/live || log_warn "Gagal mengatur izin untuk /etc/letsencrypt/live."
+sudo chmod 755 /etc/letsencrypt/archive || log_warn "Gagal mengatur izin untuk /etc/letsencrypt/archive."
 
 # Verifikasi Nginx Config setelah Certbot
 sudo nginx -t || log_error "Nginx konfigurasi error setelah Certbot. Periksa log!"

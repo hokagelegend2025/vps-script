@@ -10,6 +10,7 @@ SSH_PASSWORD="legend"                 # Ganti dengan password SSH (DIREKOMENDASI
 
 SSH_TUNNEL_PORT=443                  # Port Nginx untuk tunneling SSH (umumnya 443 dengan SSL)
 SSH_INTERNAL_PORT=22                 # Port SSH server (default 22)
+CERTBOT_EMAIL="your_email@example.com" # Ganti dengan alamat email Anda untuk notifikasi Certbot
 
 # --- FUNGSI LOGGING ---
 log_info() {
@@ -30,7 +31,40 @@ if [[ $EUID -ne 0 ]]; then
    log_error "Skrip ini harus dijalankan sebagai root atau dengan sudo."
 fi
 
-log_info "Memulai proses instalasi dan konfigurasi SSH Tunneling..."
+log_info "Memulai proses penghapusan dan instalasi ulang SSH Tunneling (tanpa UFW)..."
+
+# --- 0. HENTIKAN DAN HAPUS LAYANAN YANG ADA ---
+log_info "Menghentikan dan menghapus semua proses Nginx dan Certbot yang mungkin ada..."
+
+# Bunuh semua proses Nginx yang mungkin "nyangkut"
+sudo killall -9 nginx || true
+sudo rm -f /run/nginx.pid || true
+
+# Hapus Nginx sepenuhnya
+log_info "Menghapus Nginx sepenuhnya..."
+sudo apt purge nginx nginx-common -y || log_warn "Gagal menghapus Nginx, mungkin tidak terinstal."
+sudo apt autoremove -y || log_warn "Gagal autoremove paket."
+sudo apt clean || log_warn "Gagal membersihkan cache apt."
+
+# Hapus sisa-sisa konfigurasi Nginx
+log_info "Menghapus sisa-sisa konfigurasi Nginx..."
+sudo rm -rf /etc/nginx/ || log_warn "Direktori /etc/nginx tidak ditemukan."
+sudo rm -rf /var/lib/nginx/ || log_warn "Direktori /var/lib/nginx tidak ditemukan."
+sudo rm -f /var/log/nginx/* || log_warn "Log Nginx tidak ditemukan."
+
+# Hapus Certbot snap dan sisa-sisa Let's Encrypt
+log_info "Menghapus Certbot dan sisa-sisa Let's Encrypt..."
+sudo snap remove certbot || true # Hapus jika terinstal via snap
+sudo apt purge certbot -y || true # Hapus jika terinstal via apt
+sudo rm -rf /etc/letsencrypt/ || log_warn "Direktori /etc/letsencrypt tidak ditemukan."
+sudo rm -rf /var/lib/letsencrypt/ || log_warn "Direktori /var/lib/letsencrypt tidak ditemukan."
+
+# Pastikan port 443 bebas
+log_info "Memverifikasi port 443 bebas..."
+if sudo netstat -tulnp | grep ":$SSH_TUNNEL_PORT" &>/dev/null; then
+    log_error "Port $SSH_TUNNEL_PORT masih digunakan setelah pembersihan. Ada proses lain yang menggunakannya."
+fi
+log_info "Port $SSH_TUNNEL_PORT bersih."
 
 # --- 1. UPDATE SISTEM ---
 log_info "Memperbarui sistem..."
@@ -61,55 +95,105 @@ log_info "Mengkonfigurasi Nginx untuk SSH Tunneling dan HTTP..."
 
 # Buat file konfigurasi Nginx utama
 NGINX_CONF_PATH="/etc/nginx/nginx.conf"
-NGINX_SSH_STREAM_CONF="/etc/nginx/conf.d/ssh_stream.conf" # File terpisah untuk stream
 
-# Backup konfigurasi Nginx yang ada
+# Backup konfigurasi Nginx yang ada (jika ada yang baru diinstal)
 if [ -f "$NGINX_CONF_PATH" ]; then
     sudo cp "$NGINX_CONF_PATH" "${NGINX_CONF_PATH}.bak.$(date +%Y%m%d%H%M%S)"
     log_info "Backup $NGINX_CONF_PATH berhasil."
 fi
 
-# Edit nginx.conf untuk menyertakan stream block
-# Tambahkan 'include /etc/nginx/conf.d/*.conf;' di dalam stream block jika ingin modular
-sudo sed -i '/^http {/i\
-stream {\
-    map $ssl_preread_server_name $name {\
-        '$YOUR_DOMAIN' ssh_backend;\
-        default                       backend_default;\
-    }\
-\
-    upstream ssh_backend {\
-        server 127.0.0.1:'$SSH_INTERNAL_PORT';\
-    }\
-\
-    upstream backend_default {\
-        server 127.0.0.1:8080;\
-    }\
-\
-    server {\
-        listen '$SSH_TUNNEL_PORT' ssl;\
-        listen [::]:'$SSH_TUNNEL_PORT' ssl;\
-\
-        ssl_preread on;\
-        proxy_pass $name;\
-\
-        # Placeholder untuk sertifikat SSL, akan diganti oleh Certbot\
-        ssl_certificate /etc/letsencrypt/live/'$YOUR_DOMAIN'/fullchain.pem;\
-        ssl_certificate_key /etc/letsencrypt/live/'$YOUR_DOMAIN'/privkey.pem;\
-\
-        ssl_protocols TLSv1.2 TLSv1.3;\
-        ssl_ciphers 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256';\
-        ssl_prefer_server_ciphers on;\
-    }\
-}\
-' "$NGINX_CONF_PATH"
+# Buat ulang nginx.conf dari template bersih
+sudo cat <<EOF > "$NGINX_CONF_PATH"
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+error_log /var/log/nginx/error.log;
+include /etc/nginx/modules-enabled/*.conf;
 
-# Buat konfigurasi HTTP default
+events {
+    worker_connections 768;
+    # multi_accept on;
+}
+
+stream {
+    map \$ssl_preread_server_name \$name {
+        $YOUR_DOMAIN ssh_backend;
+        default                       backend_default;
+    }
+
+    upstream ssh_backend {
+        server 127.0.0.1:$SSH_INTERNAL_PORT;
+    }
+
+    upstream backend_default {
+        server 127.0.0.1:8080; # Ganti ini jika Anda punya web server di port lain
+    }
+
+    server {
+        listen $SSH_TUNNEL_PORT ssl;
+        listen [::]:$SSH_TUNNEL_PORT ssl;
+
+        ssl_preread on;
+        proxy_pass \$name;
+
+        # Placeholder untuk sertifikat SSL, akan diganti oleh Certbot
+        ssl_certificate /etc/letsencrypt/live/$YOUR_DOMAIN/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/$YOUR_DOMAIN/privkey.pem;
+
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA384';
+        ssl_prefer_server_ciphers on;
+    }
+}
+
+http {
+    ##
+    # Basic Settings
+    ##
+    sendfile on;
+    tcp_nopush on;
+    types_hash_max_size 2048;
+    # server_tokens off;
+
+    # server_names_hash_bucket_size 64;
+    # server_name_in_redirect off;
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    ##
+    # SSL Settings
+    ##
+    ssl_protocols TLSv1 TLSv1.1 TLSv1.2 TLSv1.3; # Dropping SSLv3, ref: POODLE
+    ssl_prefer_server_ciphers on;
+
+    ##
+    # Logging Settings
+    ##
+    access_log /var/log/nginx/access.log;
+
+    ##
+    # Gzip Settings
+    ##
+    gzip on;
+
+    # gzip_vary on;
+    # gzip_proxied any;
+    # gzip_comp_level 6;
+    # gzip_buffers 16 8k;
+    # gzip_http_version 1.1;
+    # gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+    ##
+    # Virtual Host Configs
+    ##
+    include /etc/nginx/conf.d/*.conf;
+    include /etc/nginx/sites-enabled/*;
+}
+EOF
+
+# Buat konfigurasi HTTP default baru (untuk port 80)
 DEFAULT_HTTP_CONF="/etc/nginx/sites-available/default"
-if [ ! -f "$DEFAULT_HTTP_CONF.bak" ]; then
-    sudo cp "$DEFAULT_HTTP_CONF" "${DEFAULT_HTTP_CONF}.bak"
-fi
-
 sudo cat <<EOF > "$DEFAULT_HTTP_CONF"
 server {
     listen 80 default_server;
@@ -130,7 +214,21 @@ sudo ln -sf "$DEFAULT_HTTP_CONF" /etc/nginx/sites-enabled/default
 
 # --- 6. DAPATKAN SERTIFIKAT SSL DENGAN CERTBOT ---
 log_info "Mendapatkan sertifikat SSL untuk $YOUR_DOMAIN..."
-sudo certbot --nginx -d "$YOUR_DOMAIN" --non-interactive --agree-tos --email your_email@example.com # Ganti email Anda
+# Hapus direktori live dan archive yang mungkin tersisa dari Certbot sebelumnya
+sudo rm -rf /etc/letsencrypt/live/$YOUR_DOMAIN || true
+sudo rm -rf /etc/letsencrypt/archive/$YOUR_DOMAIN || true
+
+# Perbarui izin direktori Let's Encrypt (penting!)
+# Ini harus 755 agar www-data bisa mengaksesnya
+sudo chmod 755 /etc/letsencrypt/live || true
+sudo chmod 755 /etc/letsencrypt/archive || true
+
+
+sudo certbot --nginx -d "$YOUR_DOMAIN" --non-interactive --agree-tos --email "$CERTBOT_EMAIL" || log_error "Gagal mendapatkan sertifikat SSL dari Certbot."
+
+# Perbaiki izin direktori Let's Encrypt setelah Certbot (ini harus tetap 755)
+sudo chmod 755 /etc/letsencrypt/live
+sudo chmod 755 /etc/letsencrypt/archive
 
 # Verifikasi Nginx Config setelah Certbot
 sudo nginx -t || log_error "Nginx konfigurasi error setelah Certbot. Periksa log!"
@@ -140,25 +238,12 @@ log_info "Membuat pengguna SSH baru '$SSH_USERNAME'..."
 if id "$SSH_USERNAME" &>/dev/null; then
     log_warn "Pengguna '$SSH_USERNAME' sudah ada, melewati pembuatan pengguna."
 else
-    # Membuat pengguna dan mengatur password
-    # CATATAN: Mengatur password di skrip tidak aman untuk produksi!
-    # Lebih baik gunakan SSH Key atau biarkan pengguna membuat password pertama kali.
     sudo useradd -m -s /bin/bash "$SSH_USERNAME" || log_error "Gagal membuat pengguna SSH."
     echo "$SSH_USERNAME:$SSH_PASSWORD" | sudo chpasswd || log_error "Gagal mengatur password pengguna SSH."
     log_info "Pengguna '$SSH_USERNAME' dengan password '$SSH_PASSWORD' berhasil dibuat."
 fi
 
-# --- 8. KONFIGURASI FIREWALL (UFW) ---
-log_info "Mengkonfigurasi firewall (UFW)..."
-sudo apt install ufw -y || log_warn "Gagal menginstal UFW, mungkin sudah terinstal."
-sudo ufw allow OpenSSH || log_warn "Gagal mengizinkan OpenSSH di UFW."
-sudo ufw allow http || log_warn "Gagal mengizinkan HTTP di UFW."
-sudo ufw allow https || log_warn "Gagal mengizinkan HTTPS di UFW."
-sudo ufw allow "$SSH_TUNNEL_PORT"/tcp comment "SSH Tunnel Port" || log_warn "Gagal mengizinkan SSH Tunnel Port di UFW."
-echo "y" | sudo ufw enable || log_warn "Gagal mengaktifkan UFW, mungkin sudah aktif."
-log_info "Firewall UFW telah dikonfigurasi. Pastikan AWS Security Groups juga diatur."
-
-# --- 9. RESTART LAYANAN ---
+# --- 8. RESTART LAYANAN ---
 log_info "Mulai ulang Nginx dan SSH untuk menerapkan perubahan..."
 sudo systemctl restart nginx || log_error "Gagal memulai ulang Nginx."
 sudo systemctl restart ssh || log_error "Gagal memulai ulang SSH."

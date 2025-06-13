@@ -110,10 +110,11 @@ pid /run/nginx.pid;
 error_log /var/log/nginx/error.log;
 include /etc/nginx/modules-enabled/*.conf;
 
+
 # Muat modul stream secara eksplisit dengan path absolut yang benar
-load_module modules/ngx_stream_module.so; # <-- UBAH BARIS INI
-load_module modules/ngx_stream_ssl_module.so; # <-- UBAH BARIS INI
-load_module modules/ngx_stream_ssl_preread_module.so; # <-- UBAH BARIS INI
+load_module /usr/lib/nginx/modules/ngx_stream_module.so;
+load_module /usr/lib/nginx/modules/ngx_stream_ssl_module.so;
+load_module /usr/lib/nginx/modules/ngx_stream_ssl_preread_module.so;
 events {
     worker_connections 768;
     # multi_accept on;

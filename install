@@ -1,194 +1,173 @@
 #!/bin/bash
 
-# =======================================================
-#               SCRIPT INSTALASI TUNNELING SSH OVER TLS
-#                       untuk Ubuntu 24 di AWS
-# =======================================================
+# --- VARIBEL YANG PERLU DIKONFIGURASI ---
+YOUR_DOMAIN="11.hokageyoutube.my.id"  # Ganti dengan domain Anda
+SSH_USERNAME="hokage"                 # Ganti dengan username SSH yang Anda inginkan
+SSH_PASSWORD="legend"                 # Ganti dengan password SSH (DIREKOMENDASIKAN MENGGUNAKAN SSH KEY!)
+                                     # Jika Anda tidak ingin password di sini, hapus baris ini dan
+                                     # ganti perintah useradd dengan "sudo useradd -m -s /bin/bash ${SSH_USERNAME}"
+                                     # Lalu tambahkan SSH Key secara manual.
 
-# --- KONFIGURASI PENGGUNA ---
-# Ganti dengan domain Anda yang sebenarnya (misal: 11.hokageyoutube.my.id)
-YOUR_DOMAIN_ANDA="11.hokageyoutube.my.id"
-
-# Ganti dengan alamat email Anda yang valid (untuk Certbot)
-YOUR_EMAIL_ANDA="faridaumiabi@gmail.com"
-
-# Nama pengguna SSH baru yang akan dibuat
-SSH_USERNAME="hokage"
-
-# =======================================================
-#               JANGAN EDIT KECUALI ANDA PAHAM
-# =======================================================
-
-echo "======================================================="
-echo "  Memulai Instalasi Tunneling SSH over TLS (Nginx + Certbot)"
-echo "  Domain Anda: $YOUR_DOMAIN_ANDA"
-echo "  Email Certbot: $YOUR_EMAIL_ANDA"
-echo "  Pengguna SSH Baru: $SSH_USERNAME"
-echo "======================================================="
-echo ""
+SSH_TUNNEL_PORT=443                  # Port Nginx untuk tunneling SSH (umumnya 443 dengan SSL)
+SSH_INTERNAL_PORT=22                 # Port SSH server (default 22)
 
 # --- FUNGSI LOGGING ---
-log_message() {
-    echo "$(date +'%Y-%m-%d %H:%M:%S') - $1"
+log_info() {
+    echo -e "\e[32m[INFO] $1\e[0m"
 }
 
-# --- 1. Perbarui Sistem dan Instal Paket Dasar ---
-log_message "Memperbarui sistem dan menginstal paket dasar..."
-sudo apt update -y || { log_message "ERROR: Gagal memperbarui paket."; exit 1; }
-sudo apt upgrade -y || { log_message "ERROR: Gagal meng-upgrade paket."; exit 1; }
-
-# Instal OpenSSH Server (biasanya sudah terinstal)
-# Jika instalasi gagal, itu kritis, jadi kita exit.
-sudo apt install openssh-server -y || { log_message "ERROR: Gagal menginstal OpenSSH Server. Aborting."; exit 1; }
-sudo systemctl enable ssh || { log_message "ERROR: Gagal mengaktifkan SSH service. Aborting."; exit 1; }
-sudo systemctl start ssh || { log_message "ERROR: Gagal memulai SSH service. Aborting."; exit 1; }
-log_message "Sistem telah diperbarui dan OpenSSH Server terinstal."
-
-# --- 2. Instal dan Konfigurasi Nginx dengan SSL/TLS (Certbot) ---
-log_message "Menginstal Nginx..."
-sudo apt install nginx -y || { log_message "ERROR: Gagal menginstal Nginx. Aborting."; exit 1; }
-sudo systemctl enable nginx || { log_message "ERROR: Gagal mengaktifkan Nginx service. Aborting."; exit 1; }
-
-log_message "Menginstal Certbot (menggunakan snap)..."
-# Kita tidak exit jika ini gagal, karena snap mungkin sudah terinstal.
-sudo snap install core || log_message "WARNING: snap core mungkin sudah terinstal atau gagal instal. Melanjutkan..."
-sudo snap refresh core || log_message "WARNING: snap core refresh mungkin gagal. Melanjutkan..."
-sudo snap install --classic certbot || log_message "WARNING: certbot snap mungkin sudah terinstal atau gagal instal. Melanjutkan..."
-
-# Perbaikan di sini: Gunakan `true` agar tidak exit jika symlink sudah ada.
-sudo ln -sf /snap/bin/certbot /usr/bin/certbot 2>/dev/null || log_message "WARNING: Gagal membuat symlink Certbot, tapi mungkin sudah ada. Melanjutkan..."
-
-# Hentikan Nginx sementara agar Certbot bisa mengambil sertifikat
-# Menggunakan `|| true` agar skrip tidak berhenti jika Nginx belum berjalan (misal: instalasi pertama)
-log_message "Menghentikan Nginx untuk proses Certbot..."
-sudo systemctl stop nginx || log_message "WARNING: Nginx tidak berjalan atau gagal dihentikan. Melanjutkan..."
-
-# Dapatkan sertifikat SSL dari Let's Encrypt menggunakan Certbot
-# Ini adalah langkah kritis, jika gagal, harus exit.
-log_message "Menjalankan Certbot untuk mendapatkan sertifikat SSL untuk $YOUR_DOMAIN_ANDA. Ikuti instruksi di layar (jika ada)!"
-sudo certbot certonly --standalone -d "$YOUR_DOMAIN_ANDA" --non-interactive --agree-tos --email "$YOUR_EMAIL_ANDA"
-if [ $? -ne 0 ]; then
-    log_message "ERROR: Certbot gagal mendapatkan sertifikat untuk $YOUR_DOMAIN_ANDA. Periksa konfigurasi DNS Anda dan pastikan port 80/443 terbuka sementara. Aborting."
-    exit 1
-fi
-
-# Pastikan Certbot berhasil mendapatkan sertifikat
-if [ ! -f "/etc/letsencrypt/live/$YOUR_DOMAIN_ANDA/fullchain.pem" ]; then
-    log_message "ERROR: Certbot gagal mendapatkan sertifikat. File sertifikat tidak ditemukan. Aborting."
-    exit 1
-fi
-log_message "Sertifikat SSL berhasil didapatkan."
-
-# Buat atau edit file konfigurasi Nginx untuk domain Anda
-log_message "Membuat konfigurasi Nginx untuk $YOUR_DOMAIN_ANDA..."
-NGINX_CONF="/etc/nginx/sites-available/$YOUR_DOMAIN_ANDA"
-sudo bash -c "cat > \"$NGINX_CONF\"" <<EOL
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $YOUR_DOMAIN_ANDA;
-
-    # Redirect HTTP ke HTTPS
-    return 301 https://\$host\$request_uri;
+log_warn() {
+    echo -e "\e[33m[WARN] $1\e[0m"
 }
 
+log_error() {
+    echo -e "\e[31m[ERROR] $1\e[0m"
+    exit 1
+}
+
+# --- CEK HAK AKSES ROOT ---
+if [[ $EUID -ne 0 ]]; then
+   log_error "Skrip ini harus dijalankan sebagai root atau dengan sudo."
+fi
+
+log_info "Memulai proses instalasi dan konfigurasi SSH Tunneling..."
+
+# --- 1. UPDATE SISTEM ---
+log_info "Memperbarui sistem..."
+sudo apt update || log_error "Gagal memperbarui daftar paket."
+sudo apt upgrade -y || log_error "Gagal mengupgrade paket."
+
+# --- 2. INSTALASI OPENSSH SERVER ---
+log_info "Memeriksa dan menginstal OpenSSH Server..."
+sudo apt install openssh-server -y || log_error "Gagal menginstal OpenSSH Server."
+sudo systemctl enable ssh || log_error "Gagal mengaktifkan SSH di startup."
+sudo systemctl start ssh || log_error "Gagal memulai SSH."
+
+# --- 3. INSTALASI NGINX ---
+log_info "Memeriksa dan menginstal Nginx..."
+sudo apt install nginx -y || log_error "Gagal menginstal Nginx."
+sudo systemctl enable nginx || log_error "Gagal mengaktifkan Nginx di startup."
+sudo systemctl start nginx || log_error "Gagal memulai Nginx."
+
+# --- 4. INSTALASI CERTBOT (untuk SSL/TLS) ---
+log_info "Memeriksa dan menginstal Certbot untuk SSL/TLS..."
+sudo snap install core --classic || log_error "Gagal menginstal snap core."
+sudo snap refresh core || log_error "Gagal refresh snap core."
+sudo snap install --classic certbot || log_error "Gagal menginstal Certbot snap."
+sudo ln -sf /snap/bin/certbot /usr/bin/certbot || log_warn "Gagal membuat symlink Certbot, mungkin sudah ada."
+
+# --- 5. KONFIGURASI NGINX (Stream dan HTTP) ---
+log_info "Mengkonfigurasi Nginx untuk SSH Tunneling dan HTTP..."
+
+# Buat file konfigurasi Nginx utama
+NGINX_CONF_PATH="/etc/nginx/nginx.conf"
+NGINX_SSH_STREAM_CONF="/etc/nginx/conf.d/ssh_stream.conf" # File terpisah untuk stream
+
+# Backup konfigurasi Nginx yang ada
+if [ -f "$NGINX_CONF_PATH" ]; then
+    sudo cp "$NGINX_CONF_PATH" "${NGINX_CONF_PATH}.bak.$(date +%Y%m%d%H%M%S)"
+    log_info "Backup $NGINX_CONF_PATH berhasil."
+fi
+
+# Edit nginx.conf untuk menyertakan stream block
+# Tambahkan 'include /etc/nginx/conf.d/*.conf;' di dalam stream block jika ingin modular
+sudo sed -i '/^http {/i\
+stream {\
+    map $ssl_preread_server_name $name {\
+        '$YOUR_DOMAIN' ssh_backend;\
+        default                       backend_default;\
+    }\
+\
+    upstream ssh_backend {\
+        server 127.0.0.1:'$SSH_INTERNAL_PORT';\
+    }\
+\
+    upstream backend_default {\
+        server 127.0.0.1:8080;\
+    }\
+\
+    server {\
+        listen '$SSH_TUNNEL_PORT' ssl;\
+        listen [::]:'$SSH_TUNNEL_PORT' ssl;\
+\
+        ssl_preread on;\
+        proxy_pass $name;\
+\
+        # Placeholder untuk sertifikat SSL, akan diganti oleh Certbot\
+        ssl_certificate /etc/letsencrypt/live/'$YOUR_DOMAIN'/fullchain.pem;\
+        ssl_certificate_key /etc/letsencrypt/live/'$YOUR_DOMAIN'/privkey.pem;\
+\
+        ssl_protocols TLSv1.2 TLSv1.3;\
+        ssl_ciphers 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256';\
+        ssl_prefer_server_ciphers on;\
+    }\
+}\
+' "$NGINX_CONF_PATH"
+
+# Buat konfigurasi HTTP default
+DEFAULT_HTTP_CONF="/etc/nginx/sites-available/default"
+if [ ! -f "$DEFAULT_HTTP_CONF.bak" ]; then
+    sudo cp "$DEFAULT_HTTP_CONF" "${DEFAULT_HTTP_CONF}.bak"
+fi
+
+sudo cat <<EOF > "$DEFAULT_HTTP_CONF"
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name $YOUR_DOMAIN_ANDA;
+    listen 80 default_server;
+    listen [::]:80 default_server;
 
-    ssl_certificate /etc/letsencrypt/live/$YOUR_DOMAIN_ANDA/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$YOUR_DOMAIN_ANDA/privkey.pem;
+    root /var/www/html;
+    index index.html index.htm index.nginx-debian.html;
 
-    # Konfigurasi SSL yang direkomendasikan
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256';
-    ssl_prefer_server_ciphers on;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-    ssl_session_tickets off;
-    ssl_dhparam /etc/ssl/certs/dhparam.pem;
+    server_name $YOUR_DOMAIN;
 
-    # Konfigurasi untuk payload SSH (HTTP/TLS Tunneling)
-    # Nginx akan merespons dengan HTTP 200 OK.
-    # Aplikasi klien seperti DarkTunnel/HTTP Custom diharapkan akan melanjutkan koneksi SSH.
     location / {
-        return 200 "OK";
-        add_header Content-Type text/plain;
+        try_files \$uri \$uri/ =404;
     }
-
-    # Anda bisa uncomment ini untuk debugging log Nginx:
-    # error_log /var/log/nginx/$YOUR_DOMAIN_ANDA-error.log warn;
-    # access_log /var/log/nginx/$YOUR_DOMAIN_ANDA-access.log;
 }
-EOL
+EOF
 
-# Buat symlink dari sites-available ke sites-enabled
-sudo ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/" || { log_message "ERROR: Gagal membuat symlink Nginx. Aborting."; exit 1; }
+sudo ln -sf "$DEFAULT_HTTP_CONF" /etc/nginx/sites-enabled/default
 
-# Hapus konfigurasi default Nginx jika ada konflik
-if [ -f "/etc/nginx/sites-enabled/default" ]; then
-    log_message "Menghapus konfigurasi Nginx default..."
-    sudo rm "/etc/nginx/sites-enabled/default"
-fi
+# --- 6. DAPATKAN SERTIFIKAT SSL DENGAN CERTBOT ---
+log_info "Mendapatkan sertifikat SSL untuk $YOUR_DOMAIN..."
+sudo certbot --nginx -d "$YOUR_DOMAIN" --non-interactive --agree-tos --email your_email@example.com # Ganti email Anda
 
-# Buat dhparam.pem untuk keamanan SSL yang lebih baik
-log_message "Membuat file dhparam.pem (ini mungkin memakan waktu beberapa menit)..."
-sudo openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048 || { log_message "ERROR: Gagal membuat dhparam.pem. Aborting."; exit 1; }
-log_message "File dhparam.pem selesai dibuat."
+# Verifikasi Nginx Config setelah Certbot
+sudo nginx -t || log_error "Nginx konfigurasi error setelah Certbot. Periksa log!"
 
-# Uji konfigurasi Nginx dan restart
-log_message "Menguji konfigurasi Nginx dan memulai ulang..."
-sudo nginx -t
-if [ $? -eq 0 ]; then
-    sudo systemctl start nginx || { log_message "ERROR: Gagal memulai Nginx. Aborting."; exit 1; }
-    sudo systemctl enable nginx || { log_message "ERROR: Gagal mengaktifkan Nginx. Aborting."; exit 1; }
-    log_message "Nginx berhasil dikonfigurasi dan berjalan dengan SSL untuk $YOUR_DOMAIN_ANDA."
-else
-    log_message "ERROR: Konfigurasi Nginx memiliki kesalahan. Silakan periksa log di atas. Aborting."
-    exit 1
-fi
-
-# --- 3. Pengaturan Pengguna SSH Baru ---
-log_message "Menambahkan pengguna SSH baru: $SSH_USERNAME..."
-
-# Buat pengguna baru jika belum ada
+# --- 7. BUAT PENGGUNA SSH BARU (Opsional) ---
+log_info "Membuat pengguna SSH baru '$SSH_USERNAME'..."
 if id "$SSH_USERNAME" &>/dev/null; then
-    log_message "Pengguna '$SSH_USERNAME' sudah ada. Melewatkan pembuatan pengguna."
+    log_warn "Pengguna '$SSH_USERNAME' sudah ada, melewati pembuatan pengguna."
 else
-    sudo adduser --gecos "" "$SSH_USERNAME" || { log_message "ERROR: Gagal membuat pengguna SSH '$SSH_USERNAME'. Aborting."; exit 1; }
-    # Atur password untuk pengguna baru
-    echo "======================================================="
-    echo "  SILAKAN ATUR PASSWORD UNTUK PENGGUNA SSH '$SSH_USERNAME':"
-    echo "======================================================="
-    sudo passwd "$SSH_USERNAME" || { log_message "ERROR: Gagal mengatur password untuk pengguna '$SSH_USERNAME'. Aborting."; exit 1; }
+    # Membuat pengguna dan mengatur password
+    # CATATAN: Mengatur password di skrip tidak aman untuk produksi!
+    # Lebih baik gunakan SSH Key atau biarkan pengguna membuat password pertama kali.
+    sudo useradd -m -s /bin/bash "$SSH_USERNAME" || log_error "Gagal membuat pengguna SSH."
+    echo "$SSH_USERNAME:$SSH_PASSWORD" | sudo chpasswd || log_error "Gagal mengatur password pengguna SSH."
+    log_info "Pengguna '$SSH_USERNAME' dengan password '$SSH_PASSWORD' berhasil dibuat."
 fi
 
-log_message "Pengguna '$SSH_USERNAME' telah disiapkan."
-log_message "Disarankan untuk mengatur SSH Key Login untuk keamanan yang lebih baik dan menonaktifkan password login setelahnya."
+# --- 8. KONFIGURASI FIREWALL (UFW) ---
+log_info "Mengkonfigurasi firewall (UFW)..."
+sudo apt install ufw -y || log_warn "Gagal menginstal UFW, mungkin sudah terinstal."
+sudo ufw allow OpenSSH || log_warn "Gagal mengizinkan OpenSSH di UFW."
+sudo ufw allow http || log_warn "Gagal mengizinkan HTTP di UFW."
+sudo ufw allow https || log_warn "Gagal mengizinkan HTTPS di UFW."
+sudo ufw allow "$SSH_TUNNEL_PORT"/tcp comment "SSH Tunnel Port" || log_warn "Gagal mengizinkan SSH Tunnel Port di UFW."
+echo "y" | sudo ufw enable || log_warn "Gagal mengaktifkan UFW, mungkin sudah aktif."
+log_info "Firewall UFW telah dikonfigurasi. Pastikan AWS Security Groups juga diatur."
 
-echo ""
-echo "======================================================="
-echo "           INSTALASI SELESAI!"
-echo "======================================================="
-echo "Langkah SELANJUTNYA YANG SANGAT PENTING (WAJIB DILAKUKAN SECARA MANUAL):"
-echo ""
-echo "1.  Konfigurasi AWS Security Group Anda:"
-echo "    Buka konsol AWS EC2 -> Instances -> Pilih instance Anda -> Tab Security -> Klik Security Group."
-echo "    Di Inbound rules, pastikan Anda menambahkan/mengizinkan port berikut:"
-echo "    - Port 22 (SSH): Dari IP Anda atau 0.0.0.0/0 (Hati-hati dengan 0.0.0.0/0 untuk port 22)."
-echo "    - Port 80 (HTTP): Dari 0.0.0.0/0 (untuk Certbot renewal)."
-echo "    - Port 443 (HTTPS): Dari 0.0.0.0/0 (untuk tunneling)."
-echo ""
-echo "2.  Konfigurasi Aplikasi Tunneling Anda (DarkTunnel/HTTP Custom/Sejenisnya):"
-echo "    - HAPUS KONFIGURASI PROXY DI APLIKASI ANDA (KOSONGKAN BAGIAN PROXY)."
-echo "    - Server/Host:   $YOUR_DOMAIN_ANDA"
-echo "    - Port:          443"
-echo "    - Pengguna SSH:  $SSH_USERNAME"
-echo "    - Password SSH:  Password yang Anda atur tadi"
-echo "    - Payload:       GET / HTTP/1.1[crlf]Host: $YOUR_DOMAIN_ANDA[crlf]Connection: Keep-Alive[crlf]Upgrade: websocket[crlf][crlf]"
-echo "    - Aktifkan SSL/TLS atau centang SSL/TLS di aplikasi."
-echo "    - SNI (jika ada): $YOUR_DOMAIN_ANDA"
-echo ""
-echo "Selamat Mencoba!"
-echo "======================================================="
+# --- 9. RESTART LAYANAN ---
+log_info "Mulai ulang Nginx dan SSH untuk menerapkan perubahan..."
+sudo systemctl restart nginx || log_error "Gagal memulai ulang Nginx."
+sudo systemctl restart ssh || log_error "Gagal memulai ulang SSH."
+
+log_info "Instalasi dan konfigurasi SSH Tunneling Selesai!"
+log_info "Informasi Koneksi:"
+log_info "  Domain: $YOUR_DOMAIN"
+log_info "  Port Tunneling: $SSH_TUNNEL_PORT"
+log_info "  Username SSH: $SSH_USERNAME"
+log_info "  Password SSH: $SSH_PASSWORD (Jika diatur via skrip)"
+log_info "Pastikan AWS Security Groups mengizinkan traffic masuk ke port $SSH_TUNNEL_PORT (dan 80, 22 jika diperlukan)."
+log_info "Sekarang Anda bisa mencoba menghubungkan HTTP Custom/DarkTunnel dengan setting ini."

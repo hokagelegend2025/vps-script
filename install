@@ -147,10 +147,9 @@ pid /run/nginx.pid;
 error_log /var/log/nginx/error.log;
 include /etc/nginx/modules-enabled/*.conf;
 
-# Muat modul stream secara eksplisit dengan path absolut yang benar
-#load_module /usr/lib/nginx/modules/ngx_stream_module.so;
-#load_module /usr/lib/nginx/modules/ngx_stream_ssl_module.so;
-#load_module /usr/lib/nginx/modules/ngx_stream_ssl_preread_module.so;
+# load_module /usr/lib/nginx/modules/ngx_stream_module.so; # Baris ini dikomentari di skrip
+# load_module /usr/lib/nginx/modules/ngx_stream_ssl_module.so; # Baris ini dikomentari di skrip
+# load_module /usr/lib/nginx/modules/ngx_stream_ssl_preread_module.so; # Baris ini dikomentari di skrip
 
 events {
     worker_connections 768;
@@ -272,9 +271,6 @@ sudo certbot --nginx -d "$YOUR_DOMAIN" --non-interactive --agree-tos --email "$C
 sudo chmod 755 /etc/letsencrypt/live || log_warn "Gagal mengatur izin ulang untuk /etc/letsencrypt/live."
 sudo chmod 755 /etc/letsencrypt/archive || log_warn "Gagal mengatur izin ulang untuk /etc/letsencrypt/archive."
 
-# Verifikasi Nginx Config setelah Certbot
-sudo nginx -t || log_error "Nginx konfigurasi error setelah Certbot. Periksa log!"
-
 # --- 7. BUAT PENGGUNA SSH BARU (Opsional) ---
 log_info "Membuat pengguna SSH baru '$SSH_USERNAME'..."
 if id "$SSH_USERNAME" &>/dev/null; then
@@ -289,6 +285,9 @@ fi
 log_info "Mulai ulang Nginx dan SSH untuk menerapkan perubahan..."
 sudo systemctl restart nginx || log_error "Gagal memulai ulang Nginx."
 sudo systemctl restart ssh || log_error "Gagal memulai ulang SSH."
+
+log_info "Memverifikasi konfigurasi Nginx terakhir..."
+sudo nginx -t || log_error "Nginx konfigurasi error setelah startup. Periksa log!"
 
 log_info "Instalasi dan konfigurasi SSH Tunneling Selesai!"
 log_info "Informasi Koneksi:"
